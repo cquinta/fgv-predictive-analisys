@@ -3,6 +3,7 @@ install.packages("tidyverse")
 install.packages("ggpubr")
 install.packages("varhandle")
 install.packages("imputeTS")
+install.packages("gridextra")
 
 library(readr)
 library(dplyr)
@@ -10,6 +11,7 @@ library(tidyverse)
 library(tibble)
 library(varhandle)
 library(imputeTS)
+library(gridExtra)
 
 
 theme_set(theme_linedraw())
@@ -148,7 +150,7 @@ comp_pivoted <- comp_pivoted %>% nest(data = c(DATE_EXTRACTION, C1_1,C1_2, C2_1,
 
 head(comp_pivoted)
 
-# Preenchendo os NA´s com a média
+# Preenchendo os NA´s com a média por concorrente por produto
 
   comp_pivoted <- comp_pivoted %>% 
     #group_by(PROD_ID) %>% 
@@ -164,37 +166,81 @@ head(comp_pivoted)
 
 head(comp_pivoted)
 
-# Criando a coluna preço unitário
 
-sales <- sales %>% mutate(P_Unitario = REVENUE/QTY_ORDER)
+# Vamos passar a trabalhar com o dataset sales
 
-head(sales)
 
-# Plotando os valores
-sales %>% ggplot(aes(x = PROD_ID, y = P_Unitario, fill=PROD_ID ))+
-  geom_boxplot()
-
-# É possível notar alguns outliers, utilizaremos o mesmo critério para removê-los, 
-# isto é [Q1- (1.5)IQR] e  [Q3+(1.5)IQR] 
-
-# Criando os limites inferior e superior
-
-Q1 <- quantile(sales$P_Unitario, .25)
-
-Q3 <- quantile(sales$P_Unitario, .75)
-
-IQRPRICE <- IQR(sales$P_Unitario)
-
-# Criando o Dataset sem outliers pelo critério proposto e plotando
-sales <- subset(sales, sales$P_Unitario > (Q1 - 1.5*IQRPRICE) & sales$P_Unitario < (Q3 + 1.5*IQRPRICE))
-
-sales %>% ggplot(aes(x = PROD_ID, y = P_Unitario, fill=PROD_ID ))+
-  geom_boxplot()
-
+# Agrupando a quantidade de vendas e o preço unitário por produto e por dia.
 sales <- sales %>% 
   group_by(PROD_ID, DATE_ORDER) %>% 
   summarise(QTY_ORDER = sum(QTY_ORDER),
             REVENUE = sum(REVENUE))
-  
+
+# Criando a coluna preço unitário
 sales <- sales %>% mutate(P_Unitario = REVENUE/QTY_ORDER)
 head(sales)
+
+# Plotando os valores para o preço unitário por produto
+
+p1 <- sales %>% ggplot(aes(x = PROD_ID, y = P_Unitario, fill=PROD_ID ))+
+  geom_boxplot()
+
+# Plotando os valores de contagem de vendas por produto 
+
+p2 <- sales %>% ggplot(aes(x = PROD_ID, y = QTY_ORDER, fill=PROD_ID ))+
+  geom_boxplot()
+
+
+# Plotando os valores de receita por produto
+
+p3 <- sales %>% ggplot(aes(x = PROD_ID, y = REVENUE, fill=PROD_ID ))+
+  geom_boxplot()
+
+grid.arrange(p1,p2,p3,nrow=3)
+
+# Comparando os 3 plots é possível notar que na maioria dos casos em que há outliers 
+# na quantidade de orens também há outliers na receita o que deixa o preço unitário com 
+# poucos outliers, excessão feita ao produto 6. Vamos optar por manter os outliers, muito embora o P6 merecesse uma 
+# avaliação mais detalhada se houvesse tempo. 
+
+# A base não possui NA´s . 
+
+
+
+# Adicionando o lag de 1 dia a exemplo do que foi feito para a base de preços dos concorrentes. 
+ 
+sales <- sales %>% 
+    group_by(PROD_ID) %>% 
+    nest() %>% 
+    mutate(data = map(data, ~mutate_at(.x, "QTY_ORDER", lag)))  %>%
+    mutate(data = map(data, ~mutate_at(.x, "REVENUE", lag)))  %>%
+    mutate(data = map(data, ~mutate_at(.x, "P_Unitario", lag)))  %>%
+    unnest(cols = c(data))
+
+
+# Unificando o nome da coluna tipo data nos dois datasets
+sales <- sales %>% rename("DATA" = "DATE_ORDER")
+comp_pivoted <- comp_pivoted %>% rename("DATA"="DATE_EXTRACTION")
+
+# Unificando os datasets
+DF <- left_join(sales,comp_pivoted)
+DF
+DF %>% map_dbl(~sum(is.na(.x)))
+
+DF <- DF %>% 
+  nest(data = c(DATA, QTY_ORDER, P_Unitario, C1_1,C1_2, C2_1,C2_2, C3_1,C3_2,C4_1,C4_2, C5_1, C5_2, C6_1, C6_2)) %>% 
+  mutate(data = map(data, ~.x %>% filter(DATA > first(DATA)))) %>% 
+  unnest(cols = c(data))
+
+DF <- DF %>% 
+  #group_by(PROD_ID) %>% 
+  nest() %>% 
+  mutate(data = map(data, ~mutate_at(.x, paste0("C1_", 1:2), ~ifelse(is.na(.x),mean(.x,na.rm=T), .x)))) %>%
+  mutate(data = map(data, ~mutate_at(.x, paste0("C2_", 1:2), ~ifelse(is.na(.x),mean(.x,na.rm=T), .x)))) %>% 
+  mutate(data = map(data, ~mutate_at(.x, paste0("C3_", 1:2), ~ifelse(is.na(.x),mean(.x,na.rm=T), .x)))) %>% 
+  mutate(data = map(data, ~mutate_at(.x, paste0("C4_", 1:2), ~ifelse(is.na(.x),mean(.x,na.rm=T), .x)))) %>% 
+  mutate(data = map(data, ~mutate_at(.x, paste0("C5_", 1:2), ~ifelse(is.na(.x),mean(.x,na.rm=T), .x)))) %>% 
+  mutate(data = map(data, ~mutate_at(.x, paste0("C6_", 1:2), ~ifelse(is.na(.x),mean(.x,na.rm=T), .x)))) %>% 
+  unnest(cols = c(data))
+
+DF %>% map_dbl(~sum(is.na(.x)))
