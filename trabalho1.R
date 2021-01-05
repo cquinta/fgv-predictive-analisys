@@ -354,9 +354,9 @@ ranger_tune <-
 autoplot(ranger_tune)
 
 # Selecionando melhor modelo
-lowest_rmse <- show_best(ranger_tune,metric="rmse")
-lowest_rsq <- show_best(ranger_tune,metric="rsq")
-lowest_rsq
+show_best(ranger_tune,metric="rmse")
+show_best(ranger_tune,metric="rsq")
+
 
 # Finalizando o modelo
 final_rf <- ranger_workflow %>% 
@@ -383,3 +383,4 @@ workflow() %>%
   fit(DF_train) %>%
   pull_workflow_fit() %>%
   vip(aesthetics = list(alpha = 0.8, fill = "midnightblue"))
+
