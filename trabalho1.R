@@ -1,47 +1,42 @@
-# ****ANTES DE RODAR*****:
-## Certificar-se que na raiz do projeto há um diretório chamado dataset contendo os arquivos comp_prices.csv e sales.csv...
-
 # Setup Inicial
 install.packages("tidyverse")
 install.packages("ggpubr")
-install.packages("varhandle")
-install.packages("imputeTS")
 install.packages("gridExtra")
-install.packages("rpart.plot")
-install.packages("hydroGOF")
-install.packages("ggoftify")
-install.packages("patchwork")
 install.packages("ggcorrplot")
 install.packages("randomForest")
 install.packages("caret")
 install.packages("doParallel")
 install.packages("ranger")
+install.packages("tidymodels")
+install.packages("rsample")
+install.packages("vip")
+install.packages("usemodels")
 
 
-
-
+library(recipes)
+library(parsnip)
+library(workflows)
+library(tune)
+library(ranger)
+library(vip)
 library(readr)
 library(dplyr)
 library(tidyverse)
 library(tibble)
-library(varhandle)
-library(imputeTS)
 library(gridExtra)
-library(rpart) 
-library(rpart.plot) 
-library(hydroGOF)
 library(corrplot)
 library(ggcorrplot)
-library(ggfortify)
 library(randomForest)
 library(caret)
-library(ranger)
-
+library(tidymodels)
+library(rsample)
+library(yardstick)
+library(usemodels)
 theme_set(theme_linedraw())
 
-# Lendo os DataSets
-comp_prices <- read_csv("datasets/comp_prices.csv")
-sales <- read_csv("datasets/sales.csv")
+# Lendo os DataSets que devem estar localizados no diretório raiz
+comp_prices <- read_csv("comp_prices.csv")
+sales <- read_csv("sales.csv")
 
 
 # *** TRATANDO O DATASET COMP_PRICES ***
@@ -91,7 +86,7 @@ IQRPRICE <- IQR(comp_prices_grouped_distinct$COMPETITOR_PRICE)
 comp_prices_ajusted <- subset(comp_prices_grouped_distinct, comp_prices_grouped_distinct$COMPETITOR_PRICE > (Q1 - 1.5*IQRPRICE) & comp_prices_grouped_distinct$COMPETITOR_PRICE < (Q3 + 1.5*IQRPRICE))
 head(comp_prices_ajusted)
 
-# Plotando os valores
+# Plotando os valores sem outliers
 comp_prices_ajusted %>% ggplot(aes(x = PAY_TYPE,y = COMPETITOR_PRICE, fill = COMPETITOR))+
   geom_boxplot()+  
   facet_wrap(~PROD_ID)+
@@ -219,6 +214,8 @@ p2 <- sales %>% ggplot(aes(x = PROD_ID, y = QTY_ORDER, fill=PROD_ID ))+
 p3 <- sales %>% ggplot(aes(x = PROD_ID, y = REVENUE, fill=PROD_ID ))+
   geom_boxplot()
 
+
+# Visualizando 
 grid.arrange(p1,p2,p3,nrow=3)
 
 # Comparando os 3 plots é possível notar que na maioria dos casos em que há outliers 
@@ -277,58 +274,112 @@ DF <- DF %>%
   mutate(data = map(data, ~mutate_at(.x, paste0("C6_", 1:2), ~ifelse(is.na(.x),mean(.x,na.rm=T), .x)))) %>% 
   unnest(cols = c(data))
 
-
-DF$DAY_OF_THE_WEEK = lubridate::day(DF$DATA)
-
+# Retirando a variável REVENUE por ter relação direta com o preço unitário
 DF <- select(DF,-c("REVENUE"))
 
 # Informações gerais sobre o dataframe a ser utilizado para a modelagem.
 
-status <- DF %>% select(-DATA) %>% nest() %>% {map2_dfr(.$PROD_ID, .$data ,~.y %>% funModeling::df_status() %>% bind_cols(PROD_ID = .x,n_row=nrow(.y)))} 
-status
-
+skimr::skim(DF)
 
 # Iniciando a Modelagem 
 
-set.seed(100)
+set.seed(123)
 
-# Modelo com todos os produtos
+# construindo o modelo
 
-# Selecionando  treino e teste
+head(DF)
 
+## Criando treino e teste
+DF_split <- initial_split(DF,strata=QTY_ORDER)
+DF_train <- training(DF_split)
+DF_test <- testing(DF_split)
 
-id.train_all = sample(1:nrow(DF), 0.7*nrow(DF))
-train_all = DF[id.train_all,]
-test_all= DF[-id.train_all,]
+DF_split
+# De 2153 registros 1617 serão utiizados para treino e 536 para teste
 
-dim(train_all)
-dim(test_all)
-# Criando TrianControl
-
-
-myTrainingControl <- trainControl(method = "cv", number=10)
-
-
-doParallel::registerDoParallel() # registrar para processamento paralelo
-randomForestFit <- train(QTY_ORDER~., 
-                         data=train_all, 
-                         method = 'ranger', 
-                         trControl=myTrainingControl
-                         )
-randomForestFit
+head(DF_train)
+head(DF_test)
 
 
-plot(randomForestFit,main = "Random Forest")
-plot(varImp(randomForestFit))
-
-prediction_rf <- predict(randomForestFit, test_all)
-
-plot(test_all$QTY_ORDER, prediction_rf,
-     main = "Random Forest", pch=17, col=c("red"))
-abline(lm(prediction_rf~test_all$QTY_ORDER))
-
-error_rf <- prediction_rf - test_all$QTY_ORDER
-rmse_rf <- sqrt(mean(error_rf^2))
-rmse_rf
+# Medodo de CV
 
 
+DF_folds <- bootstraps(DF_train, strata=QTY_ORDER)
+
+# Ao tentar utilizar o CV a quantidade de dados ficou pequena então optamos por utilizar o bootstrap
+
+# Criando o Modelo de Referência
+
+use_ranger(formula = QTY_ORDER ~., data = DF_train)
+
+# Vamos utilizar o código sugerido utilizando rando forest e fazendo algumas modificações no featureset.
+
+## Preprocessamento
+ranger_recipe <- 
+  recipe(formula = QTY_ORDER ~ ., data = DF_train) %>% 
+  step_dummy(all_nominal(),-all_outcomes()) %>%  # Criando dummy variables para PROD_ID
+  step_date(DATA, features = c("decimal", "year","dow","month"),label=FALSE) %>% # Transformando a Data em fetures numéricas
+  step_rm(DATA) # removendo a data
+
+ranger_prep <- prep(ranger_recipe)
+juice(ranger_prep)
+
+## Criando o modelo
+ranger_spec <- 
+  rand_forest(mtry = tune(), 
+              min_n = tune(), 
+              trees = 1000) %>% # este valor fará com que o tune_grid demore entre 5 a 10 minuto.
+  set_mode("regression") %>% 
+  set_engine("ranger") 
+
+
+
+## Criando o workflow
+
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+
+
+## Rodando o Modelo ( DEMORA UNS 10 MINUTOS DEPENDENDO DA MÁQUINA)
+doParallel::registerDoParallel()
+set.seed(50890)
+ranger_tune <-
+  tune_grid(ranger_workflow, 
+            resamples = DF_folds, 
+            grid = 10)
+
+# Plotando Modelo
+autoplot(ranger_tune)
+
+# Selecionando melhor modelo
+lowest_rmse <- show_best(ranger_tune,metric="rmse")
+lowest_rsq <- show_best(ranger_tune,metric="rsq")
+lowest_rsq
+
+# Finalizando o modelo
+final_rf <- ranger_workflow %>% 
+  finalize_workflow(select_best(ranger_tune,metric="rsq"))
+
+model_fit <- last_fit(final_rf,DF_split) # Demora uns 2 minutos dependendo da máquina
+
+collect_predictions(model_fit) %>%
+  ggplot(aes(QTY_ORDER, .pred)) +
+  geom_abline(lty = 2, color = "gray50") +
+  geom_point(alpha = 0.5, color = "midnightblue") +
+  coord_fixed()
+
+
+# Avaliando importancia das variáveis
+
+imp_spec <- ranger_spec %>%
+  finalize_model(select_best(ranger_tune,metric="rsq")) %>%
+  set_engine("ranger", importance = "permutation")
+
+workflow() %>%
+  add_recipe(ranger_recipe) %>%
+  add_model(imp_spec) %>%
+  fit(DF_train) %>%
+  pull_workflow_fit() %>%
+  vip(aesthetics = list(alpha = 0.8, fill = "midnightblue"))
